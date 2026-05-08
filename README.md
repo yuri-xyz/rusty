@@ -24,6 +24,8 @@ module-order
 
 Rules are implemented independently so they can be enabled, disabled, tested, documented, and evolved without coupling unrelated checks together.
 
+Current lint diagnostics report as errors.
+
 A rule should define:
 
 - its id;
@@ -95,6 +97,24 @@ unsafe {
 
 ## Implemented Rules
 
+### Lint Rules
+
+| Name / id | Description |
+| --- | --- |
+| `no-block-comments` | Disallows block comments so comments use one consistent line-oriented style. This keeps documentation and ordinary comments easier to move, diff, and reflow. |
+| `no-inline-tests` | Requires `#[test]` functions to live under a `tests/` directory. This keeps production modules focused on production code and makes test organization explicit. |
+| `max-function-args` | Limits functions to four explicit parameters. Wider APIs usually benefit from a named input type that documents related fields and reduces call-site ambiguity. |
+| `max-function-lines` | Limits function bodies to 80 code lines. Long functions tend to mix responsibilities and are harder to scan, test, and safely change. |
+| `max-file-lines` | Limits Rust source files to 700 code lines. Oversized files make module boundaries unclear and increase the cost of navigation and review. |
+
+### Formatter Rules
+
+| Name / id | Description |
+| --- | --- |
+| `block-spacing` | Groups direct child constructs inside blocks with blank lines between different kinds of work. This makes dense function bodies easier to scan without changing behavior. |
+
+## Rule Details
+
 ### `no-block-comments`
 
 Block comments are not allowed.
@@ -113,6 +133,33 @@ Invalid examples:
 /* block comment */
 /** block doc comment */
 /*! inner block doc comment */
+```
+
+This rule is not overrideable.
+
+### `no-inline-tests`
+
+Test functions marked with `#[test]` must live under a `tests/` directory.
+
+Rusty does not allow inline unit tests inside source files. Move tests into integration-style test files such as:
+
+```text
+crates/<crate-name>/tests/<topic>.rs
+```
+
+Invalid examples:
+
+```rust
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn parses_config() {}
+}
+```
+
+```rust
+#[test]
+fn parses_config() {}
 ```
 
 This rule is not overrideable.

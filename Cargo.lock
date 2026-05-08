@@ -359,6 +359,8 @@ checksum = "ab03008eb631b703dd16978282ae36c73282e7922fe101a4bd072a40ecea7b8b"
 name = "rusty-cli"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "clap",
  "rusty-core",
 ]

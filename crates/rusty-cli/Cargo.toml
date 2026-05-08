@@ -12,5 +12,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+anstream = "1.0.0"
+anstyle = "1.0.14"
 clap = { version = "4.6.1", features = ["derive"] }
 rusty-core = { path = "../rusty-core" }

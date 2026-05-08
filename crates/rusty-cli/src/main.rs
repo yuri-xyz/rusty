@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use anstyle::AnsiColor;
 use clap::{Parser, Subcommand};
+use rusty_core::{Diagnostic, DiagnosticSeverity};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,12 +50,17 @@ fn main() -> ExitCode {
 
 fn run_check(paths: Vec<PathBuf>) -> ExitCode {
   let mut had_error = false;
-  let mut diagnostics_count = 0;
+  let mut checked_files = 0;
+  let mut reports = Vec::new();
 
   for path in paths {
     match check_path(&path) {
-      Ok(count) => {
-        diagnostics_count += count;
+      Ok(CheckResult {
+        checked_file_count,
+        reports: mut path_reports,
+      }) => {
+        checked_files += checked_file_count;
+        reports.append(&mut path_reports);
       }
       Err(error) => {
         eprintln!("{}: {error}", path.display());
@@ -62,7 +69,13 @@ fn run_check(paths: Vec<PathBuf>) -> ExitCode {
     }
   }
 
-  if diagnostics_count > 0 {
+  reports.sort_by(report_order);
+
+  for report in &reports {
+    print_diagnostic(report);
+  }
+
+  if !reports.is_empty() {
     return ExitCode::from(1);
   }
 
@@ -70,12 +83,14 @@ fn run_check(paths: Vec<PathBuf>) -> ExitCode {
     return ExitCode::from(2);
   }
 
+  anstream::eprintln!("no issues found in {checked_files} files");
+
   ExitCode::SUCCESS
 }
 
-fn check_path(path: &Path) -> Result<usize, String> {
+fn check_path(path: &Path) -> Result<CheckResult, String> {
   if path.is_dir() {
-    let mut count = 0;
+    let mut result = CheckResult::default();
 
     for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
       let entry = entry.map_err(|error| error.to_string())?;
@@ -85,31 +100,90 @@ fn check_path(path: &Path) -> Result<usize, String> {
         continue;
       }
 
-      count += check_path(&path)?;
+      result.append(check_path(&path)?);
     }
 
-    return Ok(count);
+    return Ok(result);
   }
 
   if path.extension().is_none_or(|extension| extension != "rs") {
-    return Ok(0);
+    return Ok(CheckResult::default());
   }
 
   let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
-  let diagnostics = rusty_core::check_file(path, &source);
+  let reports = rusty_core::check_file(path, &source)
+    .into_iter()
+    .map(|diagnostic| DiagnosticReport {
+      path: path.to_owned(),
+      diagnostic,
+    })
+    .collect();
 
-  for diagnostic in &diagnostics {
-    eprintln!(
-      "{}:{}:{} {} {}",
-      path.display(),
-      diagnostic.line,
-      diagnostic.column,
-      diagnostic.rule_id,
-      diagnostic.message
-    );
+  Ok(CheckResult {
+    checked_file_count: 1,
+    reports,
+  })
+}
+
+fn report_order(left: &DiagnosticReport, right: &DiagnosticReport) -> std::cmp::Ordering {
+  (
+    left.diagnostic.severity,
+    &left.path,
+    left.diagnostic.line,
+    left.diagnostic.column,
+    left.diagnostic.rule_id,
+  )
+    .cmp(&(
+      right.diagnostic.severity,
+      &right.path,
+      right.diagnostic.line,
+      right.diagnostic.column,
+      right.diagnostic.rule_id,
+    ))
+}
+
+fn print_diagnostic(report: &DiagnosticReport) {
+  let diagnostic = &report.diagnostic;
+  let marker = diagnostic_marker(diagnostic, true);
+
+  anstream::eprintln!(
+    "{}:{}:{}{}: {}",
+    display_path(&report.path).display(),
+    diagnostic.line,
+    diagnostic.column,
+    marker,
+    diagnostic.message
+  );
+}
+
+fn diagnostic_marker(diagnostic: &Diagnostic, color: bool) -> String {
+  let marker = format!(
+    "[{}/{}]",
+    severity_label(diagnostic.severity),
+    diagnostic.rule_id
+  );
+
+  if !color {
+    return marker;
   }
 
-  Ok(diagnostics.len())
+  let style = match diagnostic.severity {
+    DiagnosticSeverity::Error => AnsiColor::Red.on_default().bold(),
+    DiagnosticSeverity::Warning => AnsiColor::Yellow.on_default().bold(),
+  };
+
+  format!("{}{}{}", style.render(), marker, style.render_reset())
+}
+
+fn display_path(path: &Path) -> &Path {
+  path.strip_prefix(".").unwrap_or(path)
+}
+
+fn severity_label(severity: DiagnosticSeverity) -> &'static str {
+  match severity {
+    DiagnosticSeverity::Error => "error",
+    DiagnosticSeverity::Warning => "warning",
+  }
 }
 
 fn run_format(paths: Vec<PathBuf>, check: bool) -> ExitCode {
@@ -183,4 +257,23 @@ fn is_ignored_directory(name: &std::ffi::OsStr) -> bool {
     name.to_str(),
     Some(".direnv" | ".git" | "target" | "node_modules")
   )
+}
+
+#[derive(Debug)]
+struct DiagnosticReport {
+  path: PathBuf,
+  diagnostic: Diagnostic,
+}
+
+#[derive(Debug, Default)]
+struct CheckResult {
+  checked_file_count: usize,
+  reports: Vec<DiagnosticReport>,
+}
+
+impl CheckResult {
+  fn append(&mut self, mut other: Self) {
+    self.checked_file_count += other.checked_file_count;
+    self.reports.append(&mut other.reports);
+  }
 }

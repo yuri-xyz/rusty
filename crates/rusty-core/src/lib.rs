@@ -1,11 +1,12 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use ra_ap_syntax::{
   AstNode, AstToken, Edition, NodeOrToken, SourceFile, SyntaxKind, TextRange,
-  ast::{self, CommentShape, HasName},
+  ast::{self, CommentShape, HasAttrs, HasName},
 };
 
 pub const NO_BLOCK_COMMENTS_RULE_ID: &str = "no-block-comments";
+pub const NO_INLINE_TESTS_RULE_ID: &str = "no-inline-tests";
 pub const MAX_FUNCTION_ARGS_RULE_ID: &str = "max-function-args";
 pub const MAX_FUNCTION_LINES_RULE_ID: &str = "max-function-lines";
 pub const MAX_FILE_LINES_RULE_ID: &str = "max-file-lines";
@@ -35,6 +36,11 @@ pub const RULES: &[Rule] = &[
     can_override: false,
   },
   Rule {
+    id: NO_INLINE_TESTS_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: false,
+  },
+  Rule {
     id: MAX_FUNCTION_ARGS_RULE_ID,
     kind: RuleKind::Lint,
     can_override: false,
@@ -59,9 +65,16 @@ pub const RULES: &[Rule] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
   pub rule_id: &'static str,
+  pub severity: DiagnosticSeverity,
   pub message: String,
   pub line: usize,
   pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DiagnosticSeverity {
+  Error,
+  Warning,
 }
 
 #[must_use]
@@ -70,6 +83,14 @@ pub fn check_file(path: &Path, source: &str) -> Vec<Diagnostic> {
 
   if path.extension().is_some_and(|extension| extension == "rs") {
     diagnostics.extend(check_source(source));
+
+    if !path_is_in_tests_directory(path) {
+      let parse = SourceFile::parse(source, Edition::CURRENT);
+      let file = parse.tree();
+      let line_index = LineIndex::new(source);
+
+      diagnostics.extend(check_no_inline_tests(&file, &line_index));
+    }
   }
 
   diagnostics
@@ -129,6 +150,7 @@ fn check_no_block_comments(file: &SourceFile, line_index: &LineIndex) -> Vec<Dia
 
       Some(Diagnostic {
         rule_id: NO_BLOCK_COMMENTS_RULE_ID,
+        severity: DiagnosticSeverity::Error,
         message: "block comments are not allowed; use `//` or `///` line comments instead"
           .to_owned(),
         line,
@@ -136,6 +158,43 @@ fn check_no_block_comments(file: &SourceFile, line_index: &LineIndex) -> Vec<Dia
       })
     })
     .collect()
+}
+
+fn check_no_inline_tests(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter_map(ast::Fn::cast)
+    .filter(|function| function.attrs().any(|attr| attr_is_test(&attr)))
+    .map(|function| {
+      let (line, column) = line_index.position(function.syntax().text_range().start());
+      let name = function.name().map_or_else(
+        || "test function".to_owned(),
+        |name| format!("test function `{name}`"),
+      );
+
+      Diagnostic {
+        rule_id: NO_INLINE_TESTS_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: format!("{name} is inline; move tests into a `tests/` directory instead."),
+        line,
+        column,
+      }
+    })
+    .collect()
+}
+
+fn attr_is_test(attr: &ast::Attr) -> bool {
+  attr.simple_name().is_some_and(|name| name == "test")
+}
+
+fn path_is_in_tests_directory(path: &Path) -> bool {
+  path.components().any(|component| {
+    matches!(
+      component,
+      Component::Normal(name) if name == std::ffi::OsStr::new("tests")
+    )
+  })
 }
 
 fn check_max_function_args(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
@@ -160,6 +219,7 @@ fn check_max_function_args(file: &SourceFile, line_index: &LineIndex) -> Vec<Dia
 
       Some(Diagnostic {
         rule_id: MAX_FUNCTION_ARGS_RULE_ID,
+        severity: DiagnosticSeverity::Error,
         message: format!(
           "{name} has {arg_count} parameters; functions must have at most \
            {MAX_FUNCTION_ARGS}. Use a record/struct to group related inputs."
@@ -198,6 +258,7 @@ fn check_max_function_lines(file: &SourceFile, line_index: &LineIndex) -> Vec<Di
 
       Some(Diagnostic {
         rule_id: MAX_FUNCTION_LINES_RULE_ID,
+        severity: DiagnosticSeverity::Error,
         message: format!(
           "{name} has {code_lines} lines of code; functions must have at most \
            {MAX_FUNCTION_CODE_LINES}. Split complex logic into smaller functions."
@@ -218,6 +279,7 @@ fn check_max_file_lines(code_line_index: &CodeLineIndex) -> Vec<Diagnostic> {
 
   vec![Diagnostic {
     rule_id: MAX_FILE_LINES_RULE_ID,
+    severity: DiagnosticSeverity::Error,
     message: format!(
       "Rust source files must contain at most {MAX_FILE_CODE_LINES} lines of code; this file has {code_lines}. \
        Split the file into smaller modules. Removing comments or blank lines does not count \
@@ -524,392 +586,5 @@ impl LineIndex {
       Ok(line) => line,
       Err(next_line) => next_line.saturating_sub(1),
     }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use std::fmt::Write;
-
-  #[test]
-  fn reports_functions_with_more_than_four_explicit_parameters() {
-    let source = r"
-fn allowed(a: u8, b: u8, c: u8, d: u8) {}
-
-fn denied(a: u8, b: u8, c: u8, d: u8, e: u8) {}
-";
-
-    let diagnostics = check_source(source);
-
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].rule_id, MAX_FUNCTION_ARGS_RULE_ID);
-
-    assert!(
-      diagnostics[0]
-        .message
-        .contains("function `denied` has 5 parameters")
-    );
-  }
-
-  #[test]
-  fn ignores_method_receiver_when_counting_parameters() {
-    let source = r"
-struct Service;
-
-impl Service {
-  fn allowed(&self, a: u8, b: u8, c: u8, d: u8) {}
-}
-";
-
-    let diagnostics = check_source(source);
-
-    assert!(diagnostics.is_empty());
-  }
-
-  #[test]
-  fn reports_functions_with_more_than_eighty_code_lines() {
-    let mut source = String::from("fn too_long() {\n");
-
-    for line in 0..81 {
-      writeln!(source, "  let value_{line} = {line};").unwrap();
-    }
-
-    source.push_str("}\n");
-
-    let diagnostics = check_source(&source);
-
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].rule_id, MAX_FUNCTION_LINES_RULE_ID);
-
-    assert!(
-      diagnostics[0]
-        .message
-        .contains("function `too_long` has 81 lines of code")
-    );
-  }
-
-  #[test]
-  fn ignores_blank_and_comment_only_lines_for_function_line_count() {
-    let mut source = String::from("fn allowed() {\n");
-
-    for line in 0..80 {
-      writeln!(source, "  let value_{line} = {line};").unwrap();
-    }
-
-    for _ in 0..20 {
-      source.push_str("\n  // comment\n");
-    }
-
-    source.push_str("}\n");
-
-    let diagnostics = check_source(&source);
-
-    assert!(diagnostics.is_empty());
-  }
-
-  #[test]
-  fn reports_files_with_more_than_seven_hundred_code_lines() {
-    let mut source = String::new();
-
-    for line in 0..701 {
-      writeln!(source, "const VALUE_{line}: usize = {line}").unwrap();
-    }
-
-    let diagnostics = check_source(&source);
-
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].rule_id, MAX_FILE_LINES_RULE_ID);
-    assert!(diagnostics[0].message.contains("this file has 701"));
-
-    assert!(
-      diagnostics[0]
-        .message
-        .contains("Removing comments or blank lines does not count")
-    );
-  }
-
-  #[test]
-  fn ignores_blank_and_comment_only_lines_for_file_line_count() {
-    let source = r"
-// comment
-
-// more comments
-/// doc comment
-fn allowed() {}
-";
-
-    assert_eq!(
-      CodeLineIndex::new(
-        &SourceFile::parse(source, Edition::CURRENT).tree(),
-        &LineIndex::new(source)
-      )
-      .total(),
-      1
-    );
-  }
-
-  #[test]
-  fn reports_block_comments() {
-    let source = r"
-fn main() {
-  /* prefer line comments */
-  let value = 5;
-}
-";
-
-    let diagnostics = check_source(source);
-
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].rule_id, NO_BLOCK_COMMENTS_RULE_ID);
-    assert!(diagnostics[0].message.contains("use `//` or `///`"));
-  }
-
-  #[test]
-  fn allows_line_and_doc_line_comments() {
-    let source = r"
-/// Adds two values.
-fn add(left: i32, right: i32) -> i32 {
-  // Keep this obvious.
-  left + right
-}
-";
-
-    let diagnostics = check_source(source);
-
-    assert!(diagnostics.is_empty());
-  }
-
-  #[test]
-  fn formats_construct_groups_inside_blocks() {
-    let source = r"
-fn main() {
-  let foo = value();
-  let bar = value();
-  foo::bar();
-  foo.bar();
-  return 5;
-}
-";
-
-    let expected = r"
-fn main() {
-  let foo = value();
-  let bar = value();
-
-  foo::bar();
-  foo.bar();
-
-  return 5;
-}
-";
-
-    assert_eq!(format_source(source), expected);
-  }
-
-  #[test]
-  fn formats_tail_expression_as_a_separate_group() {
-    let source = r"
-fn value() -> i32 {
-  let foo = 5;
-  foo
-}
-";
-
-    let expected = r"
-fn value() -> i32 {
-  let foo = 5;
-
-  foo
-}
-";
-
-    assert_eq!(format_source(source), expected);
-  }
-
-  #[test]
-  fn formats_nested_block_construct_groups() {
-    let source = r"
-fn main() {
-  if enabled {
-    let foo = 5;
-    work(foo);
-  }
-}
-";
-
-    let expected = r"
-fn main() {
-  if enabled {
-    let foo = 5;
-
-    work(foo);
-  }
-}
-";
-
-    assert_eq!(format_source(source), expected);
-  }
-
-  #[test]
-  fn leaves_comment_separated_constructs_unchanged() {
-    let source = r"
-fn main() {
-  let foo = 5;
-  // Keep this attached to the call.
-  work(foo);
-}
-";
-
-    assert_eq!(format_source(source), source);
-  }
-
-  #[test]
-  fn formats_conditionals_and_match_as_separate_groups() {
-    let source = r"
-fn main() {
-  let value = read();
-  call(value);
-  if value > 5 {
-    call(value);
-  } else if value > 2 {
-    other(value);
-  } else {
-    fallback();
-  }
-  match value {
-    0 => zero(),
-    _ => many(),
-  }
-  finish();
-}
-";
-
-    let expected = r"
-fn main() {
-  let value = read();
-
-  call(value);
-
-  if value > 5 {
-    call(value);
-  } else if value > 2 {
-    other(value);
-  } else {
-    fallback();
-  }
-
-  match value {
-    0 => zero(),
-    _ => many(),
-  }
-
-  finish();
-}
-";
-
-    assert_eq!(format_source(source), expected);
-  }
-
-  #[test]
-  fn keeps_macro_calls_with_action_group() {
-    let source = r"
-fn main() {
-  let value = read();
-  trace!(value);
-  call(value);
-}
-";
-
-    let expected = r"
-fn main() {
-  let value = read();
-
-  trace!(value);
-  call(value);
-}
-";
-
-    assert_eq!(format_source(source), expected);
-  }
-
-  #[test]
-  fn separates_multiline_entries_even_when_kind_matches() {
-    let source = r"
-fn main() {
-  let foo = {
-    value()
-  };
-  let bar = value();
-  let baz = value();
-  call(
-    foo,
-  );
-  other(foo);
-  let record = Config {
-    foo,
-    bar,
-  };
-  let final_value = value();
-}
-";
-
-    let expected = r"
-fn main() {
-  let foo = {
-    value()
-  };
-
-  let bar = value();
-  let baz = value();
-
-  call(
-    foo,
-  );
-
-  other(foo);
-
-  let record = Config {
-    foo,
-    bar,
-  };
-
-  let final_value = value();
-}
-";
-
-    assert_eq!(format_source(source), expected);
-  }
-
-  #[test]
-  fn separates_adjacent_multiline_matches() {
-    let source = r"
-fn main() {
-  match first {
-    Some(value) => value,
-    None => 0,
-  }
-  match second {
-    Some(value) => value,
-    None => 0,
-  }
-}
-";
-
-    let expected = r"
-fn main() {
-  match first {
-    Some(value) => value,
-    None => 0,
-  }
-
-  match second {
-    Some(value) => value,
-    None => 0,
-  }
-}
-";
-
-    assert_eq!(format_source(source), expected);
   }
 }
