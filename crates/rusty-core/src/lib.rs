@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use ra_ap_syntax::{
@@ -81,13 +80,14 @@ pub fn check_source(source: &str) -> Vec<Diagnostic> {
   let parse = SourceFile::parse(source, Edition::CURRENT);
   let file = parse.tree();
   let line_index = LineIndex::new(source);
+  let code_line_index = CodeLineIndex::new(&file, &line_index);
 
   let mut diagnostics = Vec::new();
 
   diagnostics.extend(check_no_block_comments(&file, &line_index));
   diagnostics.extend(check_max_function_args(&file, &line_index));
   diagnostics.extend(check_max_function_lines(&file, &line_index));
-  diagnostics.extend(check_max_file_lines(&file));
+  diagnostics.extend(check_max_file_lines(&code_line_index));
 
   diagnostics
 }
@@ -96,7 +96,8 @@ pub fn check_source(source: &str) -> Vec<Diagnostic> {
 pub fn format_source(source: &str) -> String {
   let parse = SourceFile::parse(source, Edition::CURRENT);
   let file = parse.tree();
-  let mut edits = block_spacing_edits(source, &file);
+  let line_index = LineIndex::new(source);
+  let mut edits = block_spacing_edits(source, &file, &line_index);
 
   if edits.is_empty() {
     return source.to_owned();
@@ -182,7 +183,7 @@ fn check_max_function_lines(file: &SourceFile, line_index: &LineIndex) -> Vec<Di
         .find_map(ast::BlockExpr::cast)?
         .stmt_list()?;
 
-      let code_lines = code_line_numbers_for_node(line_index, stmt_list.syntax()).len();
+      let code_lines = count_code_lines_for_node(line_index, stmt_list.syntax());
 
       if code_lines <= MAX_FUNCTION_CODE_LINES {
         return None;
@@ -208,38 +209,35 @@ fn check_max_function_lines(file: &SourceFile, line_index: &LineIndex) -> Vec<Di
     .collect()
 }
 
-fn check_max_file_lines(file: &SourceFile) -> Vec<Diagnostic> {
-  let code_lines = code_line_numbers(file);
+fn check_max_file_lines(code_line_index: &CodeLineIndex) -> Vec<Diagnostic> {
+  let code_lines = code_line_index.total();
 
-  if code_lines.len() <= MAX_FILE_CODE_LINES {
+  if code_lines <= MAX_FILE_CODE_LINES {
     return Vec::new();
   }
 
   vec![Diagnostic {
     rule_id: MAX_FILE_LINES_RULE_ID,
     message: format!(
-      "Rust source files must contain at most {MAX_FILE_CODE_LINES} lines of code; this file has \
-       {}. Split the file into smaller modules. Removing comments or blank lines does not count \
+      "Rust source files must contain at most {MAX_FILE_CODE_LINES} lines of code; this file has {code_lines}. \
+       Split the file into smaller modules. Removing comments or blank lines does not count \
        and should not be used to circumvent this rule.",
-      code_lines.len()
     ),
     line: 1,
     column: 1,
   }]
 }
 
-fn code_line_numbers(file: &SourceFile) -> BTreeSet<usize> {
-  let text = file.syntax().text().to_string();
-  let line_index = LineIndex::new(&text);
-
-  code_line_numbers_for_node(&line_index, file.syntax())
+fn is_non_code_token(kind: SyntaxKind) -> bool {
+  matches!(
+    kind,
+    SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::L_CURLY | SyntaxKind::R_CURLY
+  )
 }
 
-fn code_line_numbers_for_node(
-  line_index: &LineIndex,
-  node: &ra_ap_syntax::SyntaxNode,
-) -> BTreeSet<usize> {
-  let mut code_lines = BTreeSet::new();
+fn count_code_lines_for_node(line_index: &LineIndex, node: &ra_ap_syntax::SyntaxNode) -> usize {
+  let mut count = 0;
+  let mut last_line = None;
 
   for element in node.descendants_with_tokens() {
     let NodeOrToken::Token(token) = element else {
@@ -250,28 +248,24 @@ fn code_line_numbers_for_node(
       continue;
     }
 
-    let range = token.text_range();
+    for line in line_index.lines_for_range(token.text_range()) {
+      if last_line == Some(line) {
+        continue;
+      }
 
-    for line in line_index.lines_for_range(range) {
-      code_lines.insert(line);
+      count += 1;
+      last_line = Some(line);
     }
   }
 
-  code_lines
+  count
 }
 
-fn is_non_code_token(kind: SyntaxKind) -> bool {
-  matches!(
-    kind,
-    SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::L_CURLY | SyntaxKind::R_CURLY
-  )
-}
-
-fn block_spacing_edits(source: &str, file: &SourceFile) -> Vec<TextEdit> {
+fn block_spacing_edits(source: &str, file: &SourceFile, line_index: &LineIndex) -> Vec<TextEdit> {
   let mut edits = Vec::new();
 
   for stmt_list in file.syntax().descendants().filter_map(ast::StmtList::cast) {
-    let entries = block_entries(source, &stmt_list);
+    let entries = block_entries(line_index, &stmt_list);
 
     for pair in entries.windows(2) {
       let previous = pair[0];
@@ -304,7 +298,7 @@ fn block_spacing_edits(source: &str, file: &SourceFile) -> Vec<TextEdit> {
   edits
 }
 
-fn block_entries(source: &str, stmt_list: &ast::StmtList) -> Vec<BlockEntry> {
+fn block_entries(line_index: &LineIndex, stmt_list: &ast::StmtList) -> Vec<BlockEntry> {
   let mut entries = stmt_list
     .statements()
     .filter_map(|stmt| {
@@ -314,32 +308,25 @@ fn block_entries(source: &str, stmt_list: &ast::StmtList) -> Vec<BlockEntry> {
       Some(BlockEntry {
         range,
         kind,
-        is_multiline: range_is_multiline(source, range),
+        is_multiline: line_index.range_is_multiline(range),
       })
     })
     .collect::<Vec<_>>();
 
   if let Some(tail_expr) = stmt_list.tail_expr() {
     let range = tail_expr.syntax().text_range();
+    let is_duplicate = entries.last().is_some_and(|entry| entry.range == range);
 
-    entries.push(BlockEntry {
-      range,
-      kind: SpacingKind::Yield,
-      is_multiline: range_is_multiline(source, range),
-    });
+    if !is_duplicate {
+      entries.push(BlockEntry {
+        range,
+        kind: SpacingKind::Yield,
+        is_multiline: line_index.range_is_multiline(range),
+      });
+    }
   }
 
-  entries.sort_by_key(|entry| entry.range.start());
-  entries.dedup_by_key(|entry| entry.range);
-
   entries
-}
-
-fn range_is_multiline(source: &str, range: TextRange) -> bool {
-  let start = usize::from(range.start());
-  let end = usize::from(range.end());
-
-  source[start..end].contains('\n')
 }
 
 fn statement_spacing_kind(stmt: &ast::Stmt) -> Option<SpacingKind> {
@@ -443,6 +430,50 @@ struct TextEdit {
 }
 
 #[derive(Debug)]
+struct CodeLineIndex {
+  prefix: Vec<usize>,
+}
+
+impl CodeLineIndex {
+  fn new(file: &SourceFile, line_index: &LineIndex) -> Self {
+    let mut has_code = vec![false; line_index.len()];
+
+    for element in file.syntax().descendants_with_tokens() {
+      let NodeOrToken::Token(token) = element else {
+        continue;
+      };
+
+      if is_non_code_token(token.kind()) {
+        continue;
+      }
+
+      for line in line_index.lines_for_range(token.text_range()) {
+        has_code[line - 1] = true;
+      }
+    }
+
+    let mut prefix = Vec::with_capacity(has_code.len() + 1);
+
+    prefix.push(0);
+
+    for has_code in has_code {
+      let previous = *prefix.last().expect("prefix starts with a sentinel value");
+
+      prefix.push(previous + usize::from(has_code));
+    }
+
+    Self { prefix }
+  }
+
+  fn total(&self) -> usize {
+    *self
+      .prefix
+      .last()
+      .expect("prefix starts with a sentinel value")
+  }
+}
+
+#[derive(Debug)]
 struct LineIndex {
   starts: Vec<usize>,
 }
@@ -475,6 +506,17 @@ impl LineIndex {
     let end_line = self.line_index(end);
 
     (start_line + 1)..=(end_line + 1)
+  }
+
+  fn len(&self) -> usize {
+    self.starts.len()
+  }
+
+  fn range_is_multiline(&self, range: TextRange) -> bool {
+    let start = usize::from(range.start());
+    let end = usize::from(range.end()).saturating_sub(1);
+
+    self.line_index(start) != self.line_index(end)
   }
 
   fn line_index(&self, offset: usize) -> usize {
@@ -598,7 +640,11 @@ fn allowed() {}
 ";
 
     assert_eq!(
-      code_line_numbers(&SourceFile::parse(source, Edition::CURRENT).tree()).len(),
+      CodeLineIndex::new(
+        &SourceFile::parse(source, Edition::CURRENT).tree(),
+        &LineIndex::new(source)
+      )
+      .total(),
       1
     );
   }
