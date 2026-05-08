@@ -6,14 +6,24 @@ use ra_ap_syntax::{
 };
 
 pub const NO_BLOCK_COMMENTS_RULE_ID: &str = "no-block-comments";
+pub const NO_UNSAFE_RULE_ID: &str = "no-unsafe";
+pub const NO_UNWRAP_RULE_ID: &str = "no-unwrap";
+pub const NO_TODO_COMMENTS_RULE_ID: &str = "no-todo-comments";
 pub const NO_INLINE_TESTS_RULE_ID: &str = "no-inline-tests";
+pub const NO_INLINE_MODULES_RULE_ID: &str = "no-inline-modules";
 pub const MAX_FUNCTION_ARGS_RULE_ID: &str = "max-function-args";
 pub const MAX_FUNCTION_LINES_RULE_ID: &str = "max-function-lines";
+pub const MAX_IMPL_LINES_RULE_ID: &str = "max-impl-lines";
+pub const MAX_NESTING_DEPTH_RULE_ID: &str = "max-nesting-depth";
+pub const MAX_STRUCT_FIELDS_RULE_ID: &str = "max-struct-fields";
 pub const MAX_FILE_LINES_RULE_ID: &str = "max-file-lines";
 pub const BLOCK_SPACING_RULE_ID: &str = "block-spacing";
 
 const MAX_FUNCTION_ARGS: usize = 4;
 const MAX_FUNCTION_CODE_LINES: usize = 80;
+const MAX_IMPL_CODE_LINES: usize = 80;
+const MAX_NESTING_DEPTH: usize = 4;
+const MAX_STRUCT_FIELDS: usize = 12;
 const MAX_FILE_CODE_LINES: usize = 700;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +46,27 @@ pub const RULES: &[Rule] = &[
     can_override: false,
   },
   Rule {
+    id: NO_UNSAFE_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: true,
+  },
+  Rule {
+    id: NO_UNWRAP_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: false,
+  },
+  Rule {
+    id: NO_TODO_COMMENTS_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: false,
+  },
+  Rule {
     id: NO_INLINE_TESTS_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: false,
+  },
+  Rule {
+    id: NO_INLINE_MODULES_RULE_ID,
     kind: RuleKind::Lint,
     can_override: false,
   },
@@ -49,6 +79,21 @@ pub const RULES: &[Rule] = &[
     id: MAX_FUNCTION_LINES_RULE_ID,
     kind: RuleKind::Lint,
     can_override: false,
+  },
+  Rule {
+    id: MAX_IMPL_LINES_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: false,
+  },
+  Rule {
+    id: MAX_NESTING_DEPTH_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: false,
+  },
+  Rule {
+    id: MAX_STRUCT_FIELDS_RULE_ID,
+    kind: RuleKind::Lint,
+    can_override: true,
   },
   Rule {
     id: MAX_FILE_LINES_RULE_ID,
@@ -106,8 +151,15 @@ pub fn check_source(source: &str) -> Vec<Diagnostic> {
   let mut diagnostics = Vec::new();
 
   diagnostics.extend(check_no_block_comments(&file, &line_index));
+  diagnostics.extend(check_no_unsafe(&file, &line_index));
+  diagnostics.extend(check_no_unwrap(&file, &line_index));
+  diagnostics.extend(check_no_todo_comments(&file, &line_index));
+  diagnostics.extend(check_no_inline_modules(&file, &line_index));
   diagnostics.extend(check_max_function_args(&file, &line_index));
   diagnostics.extend(check_max_function_lines(&file, &line_index));
+  diagnostics.extend(check_max_impl_lines(&file, &line_index));
+  diagnostics.extend(check_max_nesting_depth(&file, &line_index));
+  diagnostics.extend(check_max_struct_fields(&file, &line_index));
   diagnostics.extend(check_max_file_lines(&code_line_index));
 
   diagnostics
@@ -160,6 +212,79 @@ fn check_no_block_comments(file: &SourceFile, line_index: &LineIndex) -> Vec<Dia
     .collect()
 }
 
+fn check_no_unsafe(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter_map(ast::BlockExpr::cast)
+    .filter_map(|block| block.unsafe_token())
+    .map(|token| {
+      let (line, column) = line_index.position(token.text_range().start());
+
+      Diagnostic {
+        rule_id: NO_UNSAFE_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: "unsafe blocks are not allowed unless justified with a Rusty override".to_owned(),
+        line,
+        column,
+      }
+    })
+    .collect()
+}
+
+fn check_no_unwrap(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter_map(ast::MethodCallExpr::cast)
+    .filter(|call| {
+      call
+        .name_ref()
+        .is_some_and(|name_ref| name_ref.text() == "unwrap")
+    })
+    .map(|call| {
+      let (line, column) = line_index.position(call.syntax().text_range().start());
+
+      Diagnostic {
+        rule_id: NO_UNWRAP_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: "use `.expect(\"...\")` instead of `.unwrap()` to describe the failure condition"
+          .to_owned(),
+        line,
+        column,
+      }
+    })
+    .collect()
+}
+
+fn check_no_todo_comments(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants_with_tokens()
+    .filter_map(NodeOrToken::into_token)
+    .filter_map(ast::Comment::cast)
+    .filter(|comment| {
+      let text = comment.syntax().text().to_string();
+
+      ["TODO", "FIXME", "XXX"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    })
+    .map(|comment| {
+      let (line, column) = line_index.position(comment.syntax().text_range().start());
+
+      Diagnostic {
+        rule_id: NO_TODO_COMMENTS_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: "tracked work comments are not allowed; move TODO/FIXME/XXX notes to an issue"
+          .to_owned(),
+        line,
+        column,
+      }
+    })
+    .collect()
+}
+
 fn check_no_inline_tests(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
   file
     .syntax()
@@ -177,6 +302,29 @@ fn check_no_inline_tests(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagn
         rule_id: NO_INLINE_TESTS_RULE_ID,
         severity: DiagnosticSeverity::Error,
         message: format!("{name} is inline; move tests into a `tests/` directory instead."),
+        line,
+        column,
+      }
+    })
+    .collect()
+}
+
+fn check_no_inline_modules(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter_map(ast::Module::cast)
+    .filter(|module| module.item_list().is_some())
+    .map(|module| {
+      let (line, column) = line_index.position(module.syntax().text_range().start());
+      let name = module
+        .name()
+        .map_or_else(|| "module".to_owned(), |name| format!("module `{name}`"));
+
+      Diagnostic {
+        rule_id: NO_INLINE_MODULES_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: format!("{name} is inline; move module contents into a separate file."),
         line,
         column,
       }
@@ -270,6 +418,100 @@ fn check_max_function_lines(file: &SourceFile, line_index: &LineIndex) -> Vec<Di
     .collect()
 }
 
+fn check_max_impl_lines(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter_map(ast::Impl::cast)
+    .filter_map(|implementation| {
+      let item_list = implementation.assoc_item_list()?;
+      let code_lines = count_code_lines_for_node(line_index, item_list.syntax());
+
+      if code_lines <= MAX_IMPL_CODE_LINES {
+        return None;
+      }
+
+      let (line, column) = line_index.position(implementation.syntax().text_range().start());
+
+      Some(Diagnostic {
+        rule_id: MAX_IMPL_LINES_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+          "impl block has {code_lines} lines of code; impl blocks must have at most \
+           {MAX_IMPL_CODE_LINES}. Split behavior into focused impls or helper modules."
+        ),
+        line,
+        column,
+      })
+    })
+    .collect()
+}
+
+fn check_max_nesting_depth(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter(|node| control_flow_kind(node.kind()).is_some())
+    .filter_map(|node| {
+      let depth = 1
+        + node
+          .ancestors()
+          .skip(1)
+          .filter(|ancestor| control_flow_kind(ancestor.kind()).is_some())
+          .count();
+
+      if depth <= MAX_NESTING_DEPTH {
+        return None;
+      }
+
+      let (line, column) = line_index.position(node.text_range().start());
+      let kind = control_flow_kind(node.kind()).expect("node was filtered by control flow kind");
+
+      Some(Diagnostic {
+        rule_id: MAX_NESTING_DEPTH_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+          "{kind} nesting depth is {depth}; control flow must be nested at most \
+           {MAX_NESTING_DEPTH} levels deep. Use early returns or helper functions."
+        ),
+        line,
+        column,
+      })
+    })
+    .collect()
+}
+
+fn check_max_struct_fields(file: &SourceFile, line_index: &LineIndex) -> Vec<Diagnostic> {
+  file
+    .syntax()
+    .descendants()
+    .filter_map(ast::Struct::cast)
+    .filter_map(|structure| {
+      let field_count = struct_field_count(&structure)?;
+
+      if field_count <= MAX_STRUCT_FIELDS {
+        return None;
+      }
+
+      let (line, column) = line_index.position(structure.syntax().text_range().start());
+      let name = structure
+        .name()
+        .map_or_else(|| "struct".to_owned(), |name| format!("struct `{name}`"));
+
+      Some(Diagnostic {
+        rule_id: MAX_STRUCT_FIELDS_RULE_ID,
+        severity: DiagnosticSeverity::Error,
+        message: format!(
+          "{name} has {field_count} fields; structs must have at most {MAX_STRUCT_FIELDS}. \
+           Group related fields into named sub-structures."
+        ),
+        line,
+        column,
+      })
+    })
+    .collect()
+}
+
 fn check_max_file_lines(code_line_index: &CodeLineIndex) -> Vec<Diagnostic> {
   let code_lines = code_line_index.total();
 
@@ -295,6 +537,24 @@ fn is_non_code_token(kind: SyntaxKind) -> bool {
     kind,
     SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::L_CURLY | SyntaxKind::R_CURLY
   )
+}
+
+fn control_flow_kind(kind: SyntaxKind) -> Option<&'static str> {
+  match kind {
+    SyntaxKind::FOR_EXPR => Some("for"),
+    SyntaxKind::IF_EXPR => Some("if"),
+    SyntaxKind::LOOP_EXPR => Some("loop"),
+    SyntaxKind::MATCH_EXPR => Some("match"),
+    SyntaxKind::WHILE_EXPR => Some("while"),
+    _ => None,
+  }
+}
+
+fn struct_field_count(structure: &ast::Struct) -> Option<usize> {
+  match structure.field_list()? {
+    ast::FieldList::RecordFieldList(fields) => Some(fields.fields().count()),
+    ast::FieldList::TupleFieldList(fields) => Some(fields.fields().count()),
+  }
 }
 
 fn count_code_lines_for_node(line_index: &LineIndex, node: &ra_ap_syntax::SyntaxNode) -> usize {

@@ -87,9 +87,16 @@ Diagnostics should be sorted by severity first, with errors before warnings, the
 Lint rules:
 
 - `no-block-comments`: block comments are not allowed.
+- `no-unsafe`: unsafe blocks are not allowed; this rule is overrideable.
+- `no-unwrap`: `.unwrap()` is not allowed; use `.expect("...")` with a descriptive reason.
+- `no-todo-comments`: `TODO`, `FIXME`, and `XXX` comments are not allowed.
 - `no-inline-tests`: `#[test]` functions must live under a `tests/` directory.
+- `no-inline-modules`: module bodies must live in separate files.
 - `max-function-args`: functions may have at most four explicit parameters.
 - `max-function-lines`: function bodies may contain at most 80 code lines.
+- `max-impl-lines`: impl blocks may contain at most 80 code lines.
+- `max-nesting-depth`: control flow may be nested at most four levels deep.
+- `max-struct-fields`: structs may have at most 12 fields; this rule is overrideable.
 - `max-file-lines`: Rust source files may contain at most 700 code lines.
 
 Formatter rules:

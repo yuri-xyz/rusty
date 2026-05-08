@@ -144,16 +144,28 @@ fn report_order(left: &DiagnosticReport, right: &DiagnosticReport) -> std::cmp::
 
 fn print_diagnostic(report: &DiagnosticReport) {
   let diagnostic = &report.diagnostic;
+  let location = diagnostic_location(report, true);
   let marker = diagnostic_marker(diagnostic, true);
 
-  anstream::eprintln!(
-    "{}:{}:{}{}: {}",
+  eprintln!("{}{}: {}", location, marker, diagnostic.message);
+}
+
+fn diagnostic_location(report: &DiagnosticReport, color: bool) -> String {
+  let diagnostic = &report.diagnostic;
+  let location = format!(
+    "{}:{}:{}",
     display_path(&report.path).display(),
     diagnostic.line,
-    diagnostic.column,
-    marker,
-    diagnostic.message
+    diagnostic.column
   );
+
+  if !color {
+    return location;
+  }
+
+  let style = AnsiColor::BrightBlack.on_default();
+
+  format!("{}{}{}", style.render(), location, style.render_reset())
 }
 
 fn diagnostic_marker(diagnostic: &Diagnostic, color: bool) -> String {
@@ -181,8 +193,8 @@ fn display_path(path: &Path) -> &Path {
 
 fn severity_label(severity: DiagnosticSeverity) -> &'static str {
   match severity {
-    DiagnosticSeverity::Error => "error",
-    DiagnosticSeverity::Warning => "warning",
+    DiagnosticSeverity::Error => "err",
+    DiagnosticSeverity::Warning => "warn",
   }
 }
 
