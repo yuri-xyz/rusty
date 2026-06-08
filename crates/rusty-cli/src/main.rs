@@ -1,10 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::{env, ffi};
 
 use anstyle::AnsiColor;
 use clap::{Parser, Subcommand};
 use rusty_core::{Diagnostic, DiagnosticSeverity};
+use serde::Deserialize;
+
+const CONFIG_FILE_NAME: &str = ".rusty.toml";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -49,12 +53,21 @@ fn main() -> ExitCode {
 }
 
 fn run_check(paths: Vec<PathBuf>) -> ExitCode {
+  let config = match RustyConfig::load(&paths) {
+    Ok(config) => config,
+    Err(error) => {
+      eprintln!("{error}");
+
+      return ExitCode::from(2);
+    }
+  };
+
   let mut had_error = false;
   let mut checked_files = 0;
   let mut reports = Vec::new();
 
   for path in paths {
-    match check_path(&path) {
+    match check_path(&path, &config) {
       Ok(CheckResult {
         checked_file_count,
         reports: mut path_reports,
@@ -88,7 +101,11 @@ fn run_check(paths: Vec<PathBuf>) -> ExitCode {
   ExitCode::SUCCESS
 }
 
-fn check_path(path: &Path) -> Result<CheckResult, String> {
+fn check_path(path: &Path, config: &RustyConfig) -> Result<CheckResult, String> {
+  if config.is_ignored(path) {
+    return Ok(CheckResult::default());
+  }
+
   if path.is_dir() {
     let mut result = CheckResult::default();
 
@@ -96,11 +113,11 @@ fn check_path(path: &Path) -> Result<CheckResult, String> {
       let entry = entry.map_err(|error| error.to_string())?;
       let path = entry.path();
 
-      if path.file_name().is_some_and(is_ignored_directory) {
+      if config.is_ignored(&path) {
         continue;
       }
 
-      result.append(check_path(&path)?);
+      result.append(check_path(&path, config)?);
     }
 
     return Ok(result);
@@ -111,6 +128,7 @@ fn check_path(path: &Path) -> Result<CheckResult, String> {
   }
 
   let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+
   let reports = rusty_core::check_file(path, &source)
     .into_iter()
     .map(|diagnostic| DiagnosticReport {
@@ -152,6 +170,7 @@ fn print_diagnostic(report: &DiagnosticReport) {
 
 fn diagnostic_location(report: &DiagnosticReport, color: bool) -> String {
   let diagnostic = &report.diagnostic;
+
   let location = format!(
     "{}:{}:{}",
     display_path(&report.path).display(),
@@ -199,11 +218,20 @@ fn severity_label(severity: DiagnosticSeverity) -> &'static str {
 }
 
 fn run_format(paths: Vec<PathBuf>, check: bool) -> ExitCode {
+  let config = match RustyConfig::load(&paths) {
+    Ok(config) => config,
+    Err(error) => {
+      eprintln!("{error}");
+
+      return ExitCode::from(2);
+    }
+  };
+
   let mut had_error = false;
   let mut formatted_count = 0;
 
   for path in paths {
-    match format_path(&path, check) {
+    match format_path(&path, check, &config) {
       Ok(count) => {
         formatted_count += count;
       }
@@ -225,7 +253,11 @@ fn run_format(paths: Vec<PathBuf>, check: bool) -> ExitCode {
   ExitCode::SUCCESS
 }
 
-fn format_path(path: &Path, check: bool) -> Result<usize, String> {
+fn format_path(path: &Path, check: bool, config: &RustyConfig) -> Result<usize, String> {
+  if config.is_ignored(path) {
+    return Ok(0);
+  }
+
   if path.is_dir() {
     let mut count = 0;
 
@@ -233,11 +265,11 @@ fn format_path(path: &Path, check: bool) -> Result<usize, String> {
       let entry = entry.map_err(|error| error.to_string())?;
       let path = entry.path();
 
-      if path.file_name().is_some_and(is_ignored_directory) {
+      if config.is_ignored(&path) {
         continue;
       }
 
-      count += format_path(&path, check)?;
+      count += format_path(&path, check, config)?;
     }
 
     return Ok(count);
@@ -264,11 +296,115 @@ fn format_path(path: &Path, check: bool) -> Result<usize, String> {
   Ok(1)
 }
 
-fn is_ignored_directory(name: &std::ffi::OsStr) -> bool {
+fn is_ignored_directory(name: &ffi::OsStr) -> bool {
   matches!(
     name.to_str(),
     Some(".direnv" | ".git" | "target" | "node_modules")
   )
+}
+
+fn is_ignored_path(path: &Path) -> bool {
+  path.file_name().is_some_and(is_ignored_directory)
+}
+
+#[derive(Debug, Default)]
+struct RustyConfig {
+  current_dir: PathBuf,
+  ignored_paths: Vec<PathBuf>,
+}
+
+impl RustyConfig {
+  fn load(paths: &[PathBuf]) -> Result<Self, String> {
+    let current_dir = env::current_dir().map_err(|error| error.to_string())?;
+
+    let Some(config_path) = find_config_path(paths, &current_dir) else {
+      return Ok(Self {
+        current_dir,
+        ignored_paths: Vec::new(),
+      });
+    };
+
+    let source = fs::read_to_string(&config_path)
+      .map_err(|error| format!("{}: failed to read config: {error}", config_path.display()))?;
+
+    let config: RawConfig = toml::from_str(&source)
+      .map_err(|error| format!("{}: failed to parse config: {error}", config_path.display()))?;
+
+    let config_dir = config_path
+      .parent()
+      .ok_or_else(|| format!("{}: config path has no parent", config_path.display()))?;
+
+    let ignored_paths = config
+      .ignore
+      .into_iter()
+      .map(|path| normalize_path(&config_dir.join(path)))
+      .collect();
+
+    Ok(Self {
+      current_dir,
+      ignored_paths,
+    })
+  }
+
+  fn is_ignored(&self, path: &Path) -> bool {
+    if is_ignored_path(path) {
+      return true;
+    }
+
+    let normalized_path = normalize_path(&self.current_dir.join(path));
+
+    self
+      .ignored_paths
+      .iter()
+      .any(|ignored_path| normalized_path.starts_with(ignored_path))
+  }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawConfig {
+  ignore: Vec<PathBuf>,
+}
+
+fn find_config_path(paths: &[PathBuf], current_dir: &Path) -> Option<PathBuf> {
+  if let Some(path) = find_config_in_ancestors(current_dir) {
+    return Some(path);
+  }
+
+  paths.iter().find_map(|path| {
+    let absolute_path = normalize_path(&current_dir.join(path));
+
+    let search_dir = if absolute_path.is_dir() {
+      absolute_path
+    } else {
+      absolute_path.parent()?.to_path_buf()
+    };
+
+    find_config_in_ancestors(&search_dir)
+  })
+}
+
+fn find_config_in_ancestors(start: &Path) -> Option<PathBuf> {
+  start
+    .ancestors()
+    .map(|path| path.join(CONFIG_FILE_NAME))
+    .find(|path| path.is_file())
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+  let mut normalized = PathBuf::new();
+
+  for component in path.components() {
+    match component {
+      std::path::Component::CurDir => {}
+      std::path::Component::ParentDir => {
+        normalized.pop();
+      }
+      component => normalized.push(component.as_os_str()),
+    }
+  }
+
+  normalized
 }
 
 #[derive(Debug)]

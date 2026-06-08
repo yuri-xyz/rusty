@@ -16,3 +16,5 @@ anstream = "1.0.0"
 anstyle = "1.0.14"
 clap = { version = "4.6.1", features = ["derive"] }
 rusty-core = { path = "../rusty-core" }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.8.23"

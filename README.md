@@ -41,6 +41,21 @@ Run through the flake app:
 nix run github:yuri-xyz/rusty -- check .
 ```
 
+## Configuration
+
+Rusty automatically discovers a `.rusty.toml` file in the current directory or one of its ancestors. If no config exists there, Rusty looks for one from the provided input paths upward.
+
+Use `ignore` to skip files or directories relative to the config file:
+
+```toml
+ignore = [
+  "crates/generated",
+  "vendor/legacy.rs",
+]
+```
+
+Ignored directories are skipped recursively for both `check` and `format`.
+
 ## Lint Rules
 
 | Rule | Policy |
