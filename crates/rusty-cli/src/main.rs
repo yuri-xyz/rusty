@@ -5,7 +5,9 @@ use std::{env, ffi};
 
 use anstyle::AnsiColor;
 use clap::{Parser, Subcommand};
-use rusty_core::{Diagnostic, DiagnosticSeverity};
+use rusty_core::{
+  Diagnostic, DiagnosticSeverity, NO_INLINE_MODULES_RULE_ID, NO_INLINE_TESTS_RULE_ID,
+};
 use serde::Deserialize;
 
 const CONFIG_FILE_NAME: &str = ".rusty.toml";
@@ -131,6 +133,7 @@ fn check_path(path: &Path, config: &RustyConfig) -> Result<CheckResult, String> 
 
   let reports = rusty_core::check_file(path, &source)
     .into_iter()
+    .filter(|diagnostic| config.rule_enabled(diagnostic.rule_id))
     .map(|diagnostic| DiagnosticReport {
       path: path.to_owned(),
       diagnostic,
@@ -311,6 +314,7 @@ fn is_ignored_path(path: &Path) -> bool {
 struct RustyConfig {
   current_dir: PathBuf,
   ignored_paths: Vec<PathBuf>,
+  rules: RuleConfig,
 }
 
 impl RustyConfig {
@@ -321,6 +325,7 @@ impl RustyConfig {
       return Ok(Self {
         current_dir,
         ignored_paths: Vec::new(),
+        rules: RuleConfig::default(),
       });
     };
 
@@ -343,6 +348,7 @@ impl RustyConfig {
     Ok(Self {
       current_dir,
       ignored_paths,
+      rules: RuleConfig::from_raw(&config.rules),
     })
   }
 
@@ -358,12 +364,45 @@ impl RustyConfig {
       .iter()
       .any(|ignored_path| normalized_path.starts_with(ignored_path))
   }
+
+  fn rule_enabled(&self, rule_id: &str) -> bool {
+    match rule_id {
+      NO_INLINE_TESTS_RULE_ID => self.rules.no_inline_tests,
+      NO_INLINE_MODULES_RULE_ID => self.rules.no_inline_modules,
+      _ => true,
+    }
+  }
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawConfig {
   ignore: Vec<PathBuf>,
+  rules: RawRuleConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawRuleConfig {
+  #[serde(rename = "no-inline-tests")]
+  no_inline_tests: Option<bool>,
+  #[serde(rename = "no-inline-modules")]
+  no_inline_modules: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+struct RuleConfig {
+  no_inline_tests: bool,
+  no_inline_modules: bool,
+}
+
+impl RuleConfig {
+  fn from_raw(raw: &RawRuleConfig) -> Self {
+    Self {
+      no_inline_tests: raw.no_inline_tests.unwrap_or(false),
+      no_inline_modules: raw.no_inline_modules.unwrap_or(false),
+    }
+  }
 }
 
 fn find_config_path(paths: &[PathBuf], current_dir: &Path) -> Option<PathBuf> {

@@ -56,6 +56,16 @@ ignore = [
 
 Ignored directories are skipped recursively for both `check` and `format`.
 
+The inline test organization rules are disabled by default. Enable either rule explicitly when a repository wants to enforce tests outside source files:
+
+```toml
+[rules]
+no-inline-tests = true
+no-inline-modules = true
+```
+
+Only `no-inline-tests` and `no-inline-modules` can currently be configured in `.rusty.toml`.
+
 ## Lint Rules
 
 | Rule | Policy |
@@ -64,8 +74,8 @@ Ignored directories are skipped recursively for both `check` and `format`.
 | `no-unsafe` | Disallows `unsafe` blocks unless they have a Rusty override with a justification. |
 | `no-unwrap` | Disallows `.unwrap()`. Use `.expect("...")` with a concrete reason instead. |
 | `no-todo-comments` | Disallows `TODO`, `FIXME`, and `XXX` comments. Track work outside source files. |
-| `no-inline-tests` | Requires `#[test]` functions to live under a `tests/` directory. |
-| `no-inline-modules` | Disallows inline `mod name { ... }` bodies. Move module bodies into files. |
+| `no-inline-tests` | Requires `#[test]` functions to live under a `tests/` directory. Disabled by default unless enabled in `.rusty.toml`. |
+| `no-inline-modules` | Disallows inline `mod name { ... }` bodies. Move module bodies into files. Disabled by default unless enabled in `.rusty.toml`. |
 | `max-function-args` | Limits functions to four explicit parameters. Method receivers do not count. |
 | `max-function-lines` | Limits function bodies to 80 code lines. Blank and comment-only lines do not count. |
 | `max-impl-lines` | Limits `impl` blocks to 80 code lines. Blank and comment-only lines do not count. |

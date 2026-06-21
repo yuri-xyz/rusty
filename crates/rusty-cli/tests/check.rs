@@ -9,6 +9,12 @@ fn check_reports_compact_colored_diagnostics_without_dot_prefix() {
   fs::create_dir_all(temp_dir.join("src")).expect("test should create src directory");
 
   fs::write(
+    temp_dir.join(".rusty.toml"),
+    "[rules]\nno-inline-tests = true\n",
+  )
+  .expect("test should write config");
+
+  fs::write(
     temp_dir.join("src/lib.rs"),
     "#[test]\nfn inline_test() {}\n",
   )
@@ -32,6 +38,103 @@ fn check_reports_compact_colored_diagnostics_without_dot_prefix() {
   assert!(stderr.contains("\u{1b}[90msrc/lib.rs:1:1\u{1b}[0m"));
   assert!(stderr.contains("[err/no-inline-tests]"));
   assert!(!stderr.contains("./src/lib.rs"));
+}
+
+#[test]
+fn check_leaves_inline_test_rules_off_by_default() {
+  let temp_dir = temp_dir();
+
+  fs::create_dir_all(temp_dir.join("src")).expect("test should create src directory");
+
+  fs::write(
+    temp_dir.join("src/lib.rs"),
+    "mod nested {\n  pub fn value() -> u8 {\n    1\n  }\n}\n\n#[test]\nfn inline_test() {\n  assert_eq!(nested::value(), 1);\n}\n",
+  )
+  .expect("test should write fixture source");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_rusty"))
+    .arg("check")
+    .arg(".")
+    .current_dir(&temp_dir)
+    .output()
+    .expect("test should run rusty check");
+
+  fs::remove_dir_all(&temp_dir).expect("test should remove temporary directory");
+
+  assert!(output.status.success());
+
+  let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+
+  assert!(stderr.contains("no issues found in 1 files"));
+  assert!(!stderr.contains("no-inline-tests"));
+  assert!(!stderr.contains("no-inline-modules"));
+}
+
+#[test]
+fn check_respects_configured_inline_test_rules() {
+  let temp_dir = temp_dir();
+
+  fs::create_dir_all(temp_dir.join("src")).expect("test should create src directory");
+
+  fs::write(
+    temp_dir.join(".rusty.toml"),
+    "[rules]\nno-inline-tests = true\nno-inline-modules = true\n",
+  )
+  .expect("test should write config");
+
+  fs::write(
+    temp_dir.join("src/lib.rs"),
+    "mod nested {\n  pub fn value() -> u8 {\n    1\n  }\n}\n\n#[test]\nfn inline_test() {\n  assert_eq!(nested::value(), 1);\n}\n",
+  )
+  .expect("test should write fixture source");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_rusty"))
+    .arg("check")
+    .arg(".")
+    .current_dir(&temp_dir)
+    .output()
+    .expect("test should run rusty check");
+
+  fs::remove_dir_all(&temp_dir).expect("test should remove temporary directory");
+
+  assert!(!output.status.success());
+
+  let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+
+  assert!(stderr.contains("[err/no-inline-tests]"));
+  assert!(stderr.contains("[err/no-inline-modules]"));
+}
+
+#[test]
+fn check_rejects_unsupported_rule_configuration() {
+  let temp_dir = temp_dir();
+
+  fs::create_dir_all(temp_dir.join("src")).expect("test should create src directory");
+
+  fs::write(temp_dir.join(".rusty.toml"), "[rules]\nno-unwrap = false\n")
+    .expect("test should write config");
+
+  fs::write(
+    temp_dir.join("src/lib.rs"),
+    "pub fn value() -> u8 {\n  1\n}\n",
+  )
+  .expect("test should write fixture source");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_rusty"))
+    .arg("check")
+    .arg(".")
+    .current_dir(&temp_dir)
+    .output()
+    .expect("test should run rusty check");
+
+  fs::remove_dir_all(&temp_dir).expect("test should remove temporary directory");
+
+  assert_eq!(output.status.code(), Some(2));
+
+  let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
+
+  assert!(stderr.contains("failed to parse config"));
+  assert!(stderr.contains("no-unwrap"));
 }
 
 #[test]
